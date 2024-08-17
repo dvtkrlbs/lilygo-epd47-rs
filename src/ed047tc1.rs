@@ -1,13 +1,18 @@
-use core::{borrow::BorrowMut, ptr::addr_of_mut};
+use core::ptr::addr_of_mut;
 
 use esp_hal::{
-    clock::Clocks, dma::{self, DmaDescriptor}, dma_buffers, gpio::{GpioPin, Level, Output, OutputPin}, lcd_cam::{lcd::i8080, LcdCam}, peripheral::Peripheral, peripherals, prelude::_fugit_RateExtU32
+    clock::Clocks,
+    dma,
+    dma_buffers,
+    gpio::{GpioPin, Level, Output, OutputPin},
+    lcd_cam::{lcd::i8080, LcdCam},
+    peripheral::Peripheral,
+    peripherals,
+    prelude::_fugit_RateExtU32,
+    Blocking,
 };
 
 use crate::rmt;
-
-static mut TX_DESCRIPTORS: [dma::DmaDescriptor; 1] = [dma::DmaDescriptor::EMPTY; 1];
-static mut RX_DESCRIPTORS: [dma::DmaDescriptor; 0] = [dma::DmaDescriptor::EMPTY; 0];
 
 const DMA_BUFFER_SIZE: usize = 248;
 
@@ -117,7 +122,7 @@ pub struct PinConfig {
 pub(crate) struct ED047TC1<'a> {
     i8080: i8080::I8080<
         'a,
-        dma::ChannelTx<'a, dma::ChannelTxImpl<0>, dma::Channel0>,
+        dma::DmaChannel0,
         i8080::TxEightBits<
             'a,
             GpioPin<6>,
@@ -129,12 +134,11 @@ pub(crate) struct ED047TC1<'a> {
             GpioPin<8>,
             GpioPin<1>,
         >,
+        Blocking,
     >,
     cfg_writer: ConfigWriter<'a, GpioPin<13>, GpioPin<12>, GpioPin<0>>,
     rmt: rmt::Rmt<'a>,
 }
-
-static mut TX_DESCRIPTOR: DmaDescriptor = dma::DmaDescriptor::EMPTY;
 
 impl<'a> ED047TC1<'a> {
     pub(crate) fn new(
@@ -152,14 +156,12 @@ impl<'a> ED047TC1<'a> {
 
         // configure dma
         let dma = dma::Dma::new(dma);
-        let channel = unsafe {
-            dma.channel0.configure(
-                false,
-                // &mut *addr_of_mut!(TX_DESCRIPTORS),
-                // &mut *addr_of_mut!(RX_DESCRIPTORS),
-                dma::DmaPriority::Priority0,
-            )
-        };
+        let channel = dma.channel0.configure(
+            false,
+            // &mut *addr_of_mut!(TX_DESCRIPTORS),
+            // &mut *addr_of_mut!(RX_DESCRIPTORS),
+            dma::DmaPriority::Priority0,
+        );
 
         // init lcd
         let lcd_cam = LcdCam::new(lcd_cam);
@@ -168,27 +170,27 @@ impl<'a> ED047TC1<'a> {
         let mut cfg_writer = ConfigWriter::new(pins.cfg_data, pins.cfg_clk, pins.cfg_str);
         cfg_writer.write();
 
-        let (tx_buffer, tx_descriptors, _, _) = dma_buffers!(32678, 0);
+        let (_tx_buffer, tx_descriptors, _, _) = dma_buffers!(32678, 0);
 
-
+        let i8080 = i8080::I8080::new(
+            lcd_cam.lcd,
+            channel.tx,
+            // &mut [TX_DESCRIPTORS, RX_DESCRIPTORS],d
+            tx_descriptors,
+            tx_pins,
+            10.MHz(),
+            i8080::Config {
+                cd_idle_edge: false,  // dc_idle_level
+                cd_cmd_edge: true,    // dc_cmd_level
+                cd_dummy_edge: false, // dc_dummy_level
+                cd_data_edge: false,  // dc_data_level
+                ..Default::default()
+            },
+            clocks,
+        )
+        .with_ctrl_pins(pins.lcd_dc, pins.lcd_wrx);
         let ctrl = ED047TC1 {
-            i8080: i8080::I8080::new(
-                lcd_cam.lcd,
-                channel.tx,
-                // &mut [TX_DESCRIPTORS, RX_DESCRIPTORS],d
-                tx_descriptors,
-                tx_pins,
-                10.MHz(),
-                i8080::Config {
-                    cd_idle_edge: false,  // dc_idle_level
-                    cd_cmd_edge: true,    // dc_cmd_level
-                    cd_dummy_edge: false, // dc_dummy_level
-                    cd_data_edge: false,  // dc_data_level
-                    ..Default::default()
-                },
-                clocks,
-            )
-            .with_ctrl_pins(pins.lcd_dc, pins.lcd_wrx),
+            i8080,
             cfg_writer,
             rmt: rmt::Rmt::new(rmt, clocks),
         };
